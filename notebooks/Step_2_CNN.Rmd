@@ -1,0 +1,109 @@
+---
+title: "Step_2_CNN"
+author: "Lehlonono Nkejane"
+date: "2026-10-14"
+output: pdf_document
+---
+
+# Prediction Task and Evaluation Design
+
+```{r}
+#| echo: FALSE
+#| warning: FALSE
+#| eval: TRUE
+#| message: FALSE
+#| include: TRUE
+
+
+# Load data
+d <- readRDS("handwriting.rds")
+meta <- d$metadata
+
+# Split by recording session
+train <- which(meta$session %in% 1:3)
+val   <- which(meta$session == 4)
+test  <- which(meta$session == 5)
+
+# Extract and scale images
+x_train <- d$images[train, , , , drop = FALSE] / 255
+x_val   <- d$images[val,   , , , drop = FALSE] / 255
+x_test  <- d$images[test,  , , , drop = FALSE] / 255
+
+# Ensure dimensions are:
+# observations x 28 x 28 x 1
+dim(x_train) <- c(length(train), 28, 28, 1)
+dim(x_val)   <- c(length(val),   28, 28, 1)
+dim(x_test)  <- c(length(test),  28, 28, 1)
+```
+
+The prediction task is closed-set writer identification given a single 28 × 28 image of a handwritten digit, predict which of the 20 writers produced it. This is a 20-class classification problem with the writer ID as the response. Each image is treated as an independent observation, and the digit label is not given to the model as an input. Writer identification was chosen because the dataset records the writer for every image, and because it directly exploits the person-level variation identified in Section 1, where writer and the person × digit × session cell together explained most of the pixel variance.
+
+```{r}
+#| echo: FALSE
+#| warning: FALSE
+#| eval: TRUE
+#| message: FALSE
+#| include: TRUE
+
+# Writer IDs: recode from 1-20 to 0-19
+y_train <- to_categorical(meta$person_id[train] - 1, 20)
+y_val   <- to_categorical(meta$person_id[val] - 1, 20)
+
+y_test_original <- meta$person_id[test] - 1
+y_test <- to_categorical(y_test_original, 20)
+
+# Keep digit labels for performance comparison by digit
+digit_test <- meta$digit[test]
+```
+
+The key design decision concerns how the data are split. Section 1 showed that the 50 replicates within each person × digit × session cell are near-identical, so a random split would place almost the same image in both the training and validation sets. Accuracy would then measure memorisation and not the ability to recognise a writer, and it would be strongly overestimated. The data were therefore split by recording session. Sessions 1 to 3 were used for training, session 4 for validation, and session 5 was reserved as a test set that is not used during model development. This reflects a realistic question, namely whether a known writer can be recognised on a new recording occasion. Writers could not be held out instead, because in a closed-set task the model must have seen each writer to name them. Pixel values were rescaled to the unit interval by dividing by 255, and the writer IDs were one-hot encoded.
+
+```{r}
+#| echo: FALSE
+#| warning: FALSE
+#| eval: TRUE
+#| message: FALSE
+#| include: FALSE
+
+set.seed(2026)
+# Define the model: mild augmentation, two convolution blocks
+input <- layer_input(shape = c(28, 28, 1))
+
+output <- input %>%
+  # Augmentation layers (only active during training)
+  layer_random_translation(height_factor = 0.05, width_factor = 0.05) %>%
+  layer_random_rotation(factor = 0.02) %>%
+  layer_random_zoom(height_factor = 0.05) %>%
+  layer_random_brightness(factor = 0.1, value_range = c(0, 1)) %>%
+  layer_conv_2d(filters = 16, kernel_size = c(3, 3)) %>%
+  layer_batch_normalization() %>%
+  layer_activation("relu") %>%
+  layer_max_pooling_2d(pool_size = c(2, 2)) %>%
+  layer_conv_2d(filters = 32, kernel_size = c(3, 3)) %>%
+  layer_batch_normalization() %>%
+  layer_activation("relu") %>%
+  layer_max_pooling_2d(pool_size = c(2, 2)) %>%
+  layer_flatten() %>%
+  layer_dropout(rate = 0.45) %>%
+  layer_dense(units = 20, activation = "softmax")
+
+model <- keras_model(inputs = input, outputs = output)
+
+# Compile the model
+model %>% compile(
+  loss = "categorical_crossentropy",
+  optimizer = optimizer_adam(learning_rate = 0.0003),
+  metrics = c("accuracy")
+)
+
+# Train for a fixed number of epochs, validating on session 4
+history <- model %>% fit(
+  x_train, y_train,
+  epochs = 10, batch_size = 32,
+  validation_data = list(x_val, y_val),
+  shuffle = TRUE
+)
+```
+The classifier is a convolutional neural network with two convolutional hidden layers. The first and second convolutional layers have [32] and [64] filters of size 3 × 3 with ReLU activation, each followed by 2 × 2 max pooling. The resulting feature maps are flattened and passed through a dropout layer with rate [0.45] to a softmax output layer with 20 units, one per writer. The network was trained with the Adam optimiser (learning rate [0.0003]) to minimise the categorical cross-entropy, using a batch size of [64] for [10] epochs, with validation accuracy monitored on session 4 after every epoch.
+
+Data augmentation was considered as a means of reducing overfitting. Geometric augmentation (random shifts, rotations and zooms) reduced validation accuracy, which is consistent with the view that writer identity is carried partly by the position, size and slant of the digit, the very properties these transformations alter. Only a mild random brightness adjustment, which mimics variation in pen darkness without altering geometry, was retained.
