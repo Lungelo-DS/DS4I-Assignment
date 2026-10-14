@@ -1,0 +1,122 @@
+---
+title: "Step_3_Siamese"
+author: "Lehlonono Nkejane"
+date: "2026-10-14"
+output: pdf_document
+---
+
+```{r}
+#| echo: TRUE
+#| warning: FALSE
+#| eval: TRUE
+#| message: FALSE
+#| include: TRUE
+
+set.seed(2026)
+
+# Split by writer: 12 for training, 4 for validation, 4 for testing (unseen writers)
+persons   <- sample(1:20)
+train_ids <- which(meta$person_id %in% persons[1:12])
+valid_ids <- which(meta$person_id %in% persons[13:16])
+test_ids  <- which(meta$person_id %in% persons[17:20])
+
+# Build n pairs: half same writer, half different writer.
+# Each pair has the same digit and different sessions.
+make_pairs <- function(ids, n) {
+  a <- sample(ids, n, replace = TRUE)
+  b <- vapply(a, function(i) {
+    same <- runif(1) < .5
+    pool <- ids[meta$digit[ids] == meta$digit[i] &                    # same digit
+                meta$session[ids] != meta$session[i] &                # different session
+                (meta$person_id[ids] == meta$person_id[i]) == same]   # same or different writer
+    sample(pool, 1)
+  }, integer(1))
+  cbind(a, b)
+}
+
+# Turn pairs into model inputs; y = 1 if same writer, 0 otherwise
+make_batch <- function(p) {
+  list(
+    left  = d$images[p[, 1], , , , drop = FALSE] / 255,
+    right = d$images[p[, 2], , , , drop = FALSE] / 255,
+    y     = matrix(as.numeric(meta$person_id[p[, 1]] == meta$person_id[p[, 2]]), ncol = 1),
+    digit = meta$digit[p[, 1]]
+  )
+}
+
+train <- make_batch(make_pairs(train_ids, 6000))
+valid <- make_batch(make_pairs(valid_ids, 2000))
+```
+
+```{r}
+#| echo: TRUE
+#| warning: FALSE
+#| eval: TRUE
+#| message: FALSE
+#| include: TRUE
+
+
+# Shared encoder: maps one image to a 16-dimensional embedding
+image <- layer_input(shape = c(28, 28, 1))
+z <- image |>
+  layer_conv_2d(16, 3, activation = "relu") |>
+  layer_max_pooling_2d(2) |>
+  layer_conv_2d(32, 3, activation = "relu") |>
+  layer_max_pooling_2d(2) |>
+  layer_flatten() |>                  # keeps position and size information
+  layer_dropout(0.1) |>
+  layer_dense(16)
+encoder <- keras_model(image, z)
+
+# Siamese network: the same encoder is applied to both images
+a <- layer_input(shape = c(28, 28, 1))
+b <- layer_input(shape = c(28, 28, 1))
+distance <- list(encoder(a), encoder(b)) |>
+  layer_lambda(f = function(z) {
+    op_sqrt(op_sum(op_square(z[[1]] - z[[2]]), axis = 2, keepdims = TRUE) + 1e-7)
+  })
+siamese <- keras_model(list(a, b), distance)
+
+# Contrastive loss: same writer pulled together, different writers pushed beyond a margin of 1
+contrastive_loss <- function(y, d) {
+  y <- op_cast(y, "float32")
+  op_mean(y * op_square(d) + (1 - y) * op_square(op_maximum(1 - d, 0)))
+}
+
+# Pair accuracy for monitoring: predict "same writer" when the distance is below 0.5
+pair_accuracy <- custom_metric("pair_accuracy", function(y_true, y_pred) {
+  y_true <- op_cast(y_true, "float32")
+  same   <- op_cast(op_less(y_pred, 0.5), "float32")
+  op_mean(op_cast(op_equal(same, y_true), "float32"))
+})
+
+siamese |> compile(
+  optimizer = optimizer_adam(0.0003),
+  loss = contrastive_loss,
+  metrics = list(pair_accuracy)
+)
+
+# Train; validation uses pairs from unseen writers
+history_s <- siamese |> fit(
+  list(train$left, train$right), train$y,
+  validation_data = list(list(valid$left, valid$right), valid$y),
+  epochs = 10, batch_size = 32
+)
+```
+
+
+
+```{r}
+#| echo: FALSE
+#| warning: FALSE
+#| eval: TRUE
+#| message: FALSE
+#| include: TRUE
+#| label: fig-siamese-training
+#| fig-cap: "Contrastive loss on the training and validation pairs by epoch"
+#| fig-width: 6
+#| fig-height: 4
+
+plot(history_s)
+```
+
