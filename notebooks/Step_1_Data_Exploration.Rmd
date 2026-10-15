@@ -1,0 +1,149 @@
+---
+title: "Step_1_Data_Exploration"
+author: "Lehlonono Nkejane"
+date: "2026-10-14"
+output: pdf_document
+---
+
+```{r}
+#| echo: FALSE
+#| warning: FALSE
+#| eval: TRUE
+#| message: FALSE
+#| include: TRUE
+
+# Load data and flatten images to 784 pixels per row
+d    <- readRDS("handwriting.rds")
+X    <- d$images[, , , 1]            # 25000 x 28 x 28
+meta <- d$metadata                   # person_id, digit, session, replicate
+Xf   <- matrix(X, nrow = nrow(X))
+
+# Plot a 28x28 matrix upright
+show <- function(m, main = "") {
+  image(t(m[nrow(m):1, ]), col = gray.colors(256, rev = TRUE),
+        axes = FALSE, asp = 1, main = main, zlim = c(0, 255))
+}
+
+# Row number of one specific image
+find <- function(p, dg, s, r) {
+  which(meta$person_id == p & meta$digit == dg &
+        meta$session == s & meta$replicate == r)
+}
+```
+
+```{r}
+#| echo: FALSE
+#| warning: FALSE
+#| eval: TRUE
+#| message: FALSE
+#| include: TRUE
+#| tbl-cap: "Basic structure of the dataset"
+
+cell_counts <- as.vector(table(meta$person_id, meta$digit, meta$session))
+
+checks <- data.frame(
+  Check = c("Images", "Image size", "Pixel range", "Missing values",
+            "Images per person x digit x session", "Blank pixels (%)"),
+  Value = c(nrow(X), paste(dim(X)[2:3], collapse = " x "),
+            paste(range(X), collapse = " to "), sum(is.na(X)),
+            paste(unique(cell_counts), collapse = ", "),
+            round(100 * mean(Xf == 0), 1))
+)
+knitr::kable(checks)
+```
+Table 1 summarises the structure of the dataset. It contains 25,000 images of 28 × 28 pixels, which matches the stated design of 20 people, 5 digits, 5 sessions and 50 replicates per cell. Pixel values range from 0 to 255 with no missing values, so no cleaning or imputation is required, although intensities should be rescaled to the unit interval before training a neural network. Every person × digit × session cell contains exactly 50 images, so the classes are perfectly balanced and no digit, person or session is over-represented. Approximately 84.7% of pixels are blank background, which reflects that each digit is a thin stroke on an empty canvas. Most raw pixel values therefore carry no information about the digit.
+
+```{r}
+#| echo: FALSE
+#| warning: FALSE
+#| eval: TRUE
+#| message: FALSE
+#| include: TRUE
+#| label: fig-digit-person
+#| fig-cap: "Digits 0-4 (rows) for each of the 20 people (columns), session 1, replicate 1"
+#| fig-width: 12
+#| fig-height: 3.5
+
+par(mfrow = c(5, 20), mar = c(0.1, 0.1, 1.2, 0.1))
+for (dg in 0:4) {
+  for (p in 1:20) {
+    show(X[find(p, dg, 1, 1), , ], main = if (dg == 0) paste0("P", p) else "")
+  }
+}
+```
+Figure 1 shows each digit as written by each of the 20 people, with session and replicate held fixed. All digits are clearly recognisable, but writers differ visibly in size, slant, aspect ratio and stroke thickness, which indicates that handwriting style is a substantial source of variation. The digit 1 is drawn with a hooked top and a flat base, which makes it resemble a 2 for several writers. This suggests that these two classes may be the most difficult to distinguish.
+
+```{r}
+#| echo: FALSE
+#| warning: FALSE
+#| eval: TRUE
+#| message: FALSE
+#| include: TRUE
+#| label: fig-person-sessions
+#| fig-cap: "Person 3: digits (rows) across the five sessions, four replicates per session"
+#| fig-width: 12
+#| fig-height: 3.5
+
+par(mfrow = c(5, 20), mar = c(0.1, 0.1, 1.2, 0.1))
+for (dg in 0:4) {
+  for (s in 1:5) {
+    for (r in 1:4) {
+      show(X[find(3, dg, s, r), , ],
+           main = if (dg == 0 && r == 1) paste("session", s) else "")
+    }
+  }
+}
+```
+
+Figure 2 shows one writer across all five sessions, with four replicates per session. Replicates within a session are almost identical, whereas the same digit varies slightly between sessions in position, size and stroke weight while keeping the same underlying shape. The writer is therefore consistent across sessions, and the session effect is a small, writer-specific perturbation. Within-session variation is much smaller than between-session or between-person variation.
+
+
+```{r}
+#| echo: FALSE
+#| warning: FALSE
+#| eval: TRUE
+#| message: FALSE
+#| include: TRUE
+#| tbl-cap: "Share of total pixel variance explained by each grouping"
+
+# Between-group sum of squares / total sum of squares
+eta2 <- function(g) {
+  g       <- as.integer(factor(g))
+  n       <- as.vector(table(g))
+  grand   <- colMeans(Xf)
+  gmeans  <- rowsum(Xf, g) / n
+  sum(n * rowSums(sweep(gmeans, 2, grand)^2)) / sum(sweep(Xf, 2, grand)^2)
+}
+
+variance <- data.frame(
+  Grouping = c("Digit", "Person", "Session", "Person x digit x session"),
+  Share = c(eta2(meta$digit), eta2(meta$person_id), eta2(meta$session),
+            eta2(interaction(meta$person_id, meta$digit, meta$session)))
+)
+knitr::kable(variance, digits = 3)
+```
+
+Table 2 reports the proportion of total pixel variance explained by each grouping factor (η²), computed as the between-group sum of squares divided by the total sum of squares. Digit explains 13.3% of the variance and person explains 11.1%, so the class label is only a modest signal in raw pixel space and writer identity is of comparable importance. Session explains 0.6% on its own, because session effects are specific to each writer and cancel when averaged across writers. Once the full person × digit × session cell is known, 91.4% of the variance is explained, leaving under 10% as within-cell variation. This confirms that replicates within a cell are close to duplicates. These values should not be ranked directly, because the groupings differ greatly in the number of groups (5 digits against 500 cells), and a grouping with more groups will explain more variance by construction.
+
+```{r}
+#| echo: FALSE
+#| warning: FALSE
+#| eval: TRUE
+#| message: FALSE
+#| include: TRUE
+#| label: fig-pca
+#| fig-cap: "First two principal components, coloured by digit and by person"
+#| fig-width: 9
+#| fig-height: 4
+
+Z <- prcomp(Xf)$x[, 1:2]
+
+par(mfrow = c(1, 2))
+plot(Z, pch = 16, cex = 0.3, main = "By digit",
+     col = c("blue", "orange", "green3", "red", "purple")[meta$digit + 1])
+plot(Z, pch = 16, cex = 0.3, main = "By person", col = rainbow(20)[meta$person_id])
+```
+
+Figure 3 projects the images onto the first two principal components, which together explain only about 14% of the variance. When coloured by digit, the digit 4 forms a fairly distinct region, while the remaining digits overlap heavily. When coloured by person, the same cloud breaks into many small clusters. The data thus consist of many tight clusters, each corresponding to one person × digit × session cell. Because the projection is linear and captures little of the total variance, the overlap shown does not imply that the classes are inseparable. The figure should be read as an illustration of this clustered structure, not as a measure of class separability.
+
+The near-duplicate replicates mean that the effective sample size is far smaller than 25,000, closer to the 500 distinct cells. Random train–test splits would therefore place near-identical images in both sets and overestimate performance. Evaluation should instead hold out whole people or whole sessions. The images are also clean, centred and free of noise, and the session effects appear to be simple parametric shifts, which may not reflect real handwriting. The dataset is limited to five digit classes and twenty writers, and findings may not generalise beyond this setting.
