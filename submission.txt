@@ -1,0 +1,12 @@
+STA5073Z Data Science for Industry 2026 - Assignment 2
+
+(a) Group members and roles
+- Lungelo Phewa (PHWLUN003): [to complete - what you did]
+- Lehlonono Nkejane ([student number]): [to complete]
+- Ishmael Ngobeni ([student number]): [to complete]
+
+(b) GitHub Pages website
+https://lungelo-ds.github.io/DS4I-Assignment/
+
+(c) GitHub repository
+https://github.com/Lungelo-DS/DS4I-Assignment

@@ -6,3 +6,5 @@ ipykernel
 tensorflow
 scikit-learn
 scipy
+tabulate
+jupyter

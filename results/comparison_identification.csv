@@ -1,0 +1,4 @@
+model,top-1 accuracy,top-3 accuracy
+CNN (softmax),0.6354,0.905
+Siamese (nearest prototype),0.6628,0.88
+CNN features (nearest prototype),0.7072,0.9276

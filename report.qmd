@@ -1,0 +1,516 @@
+---
+title: "Writer Identification and Verification from Handwritten Digits with Neural Networks"
+subtitle: "STA5073Z Data Science for Industry 2026 — Assignment 2"
+author:
+  - name: Lungelo Phewa
+    email: phwlun003@myuct.ac.za
+    affiliations:
+      - id: uct
+        name: University of Cape Town
+        department: Department of Statistical Sciences
+        city: Cape Town
+  - name: Lehlonono Nkejane
+    affiliations:
+      - ref: uct
+  - name: Ishmael Ngobeni
+    affiliations:
+      - ref: uct
+keywords:
+  - convolutional neural networks
+  - Siamese networks
+  - writer identification
+  - data leakage
+date: last-modified
+date-format: "D MMMM YYYY"
+bibliography: references.bib
+link-citations: true
+format:
+  pdf:
+    toc: true
+    number-sections: true
+    pdf-engine: xelatex
+    colorlinks: true
+    geometry:
+      - margin=2.5cm
+    fig-pos: "H"
+    fig-width: 7
+    fig-height: 3.5
+    include-in-header:
+      - text: |
+          \usepackage{amsmath}
+          \usepackage{float}
+  html:
+    toc: true
+    number-sections: true
+    embed-resources: true
+    fig-width: 7
+    fig-height: 3.5
+execute:
+  echo: false
+  warning: false
+  message: false
+jupyter: python3
+---
+
+```{python}
+#| include: false
+# Setup: modules live in src/; all trained-model results are read from results/
+# (produced by `python run_experiments.py`), so rendering does not retrain anything.
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path.cwd() / "src"))
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.stats import spearmanr
+from sklearn.metrics import f1_score, confusion_matrix
+
+from data_utils import load_handwriting
+import eda_stats as eda
+import cnn as cnn_mod
+import report_utils as ru
+from report_utils import show_table, load_csv, load_json, load_npz
+
+ru.set_style()
+images, meta = load_handwriting()
+features = eda.style_features(images, meta)
+
+
+def f3(x):
+    """Format a number with 3 decimals for inline text."""
+    return f"{x:.3f}"
+```
+
+```{python}
+#| include: false
+# ---- Task 2 results (CNN) ----
+cnn_hist = load_csv("cnn_history.csv")
+cnn_probs = load_npz("cnn_test_probs.npz")
+cnn_summary = load_json("cnn_summary.json")
+test_rows = cnn_probs["test_rows"]
+y_test = meta.person_id.to_numpy()[test_rows] - 1
+digit_test = meta.digit.to_numpy()[test_rows]
+
+cnn_metrics = {}
+for name in ["baseline", "augmented"]:
+    p = cnn_probs[name]
+    cnn_metrics[name] = {
+        "Accuracy (top-1)": cnn_mod.topk_accuracy(p, y_test, 1),
+        "Top-3 accuracy": cnn_mod.topk_accuracy(p, y_test, 3),
+        "Macro F1": f1_score(y_test, p.argmax(1), average="macro"),
+        "Epochs (best + patience)": int((cnn_hist.model == name).sum()),
+    }
+P_AUG = cnn_probs["augmented"]
+pred_aug = P_AUG.argmax(1)
+acc_aug = cnn_metrics["augmented"]["Accuracy (top-1)"]
+acc_base = cnn_metrics["baseline"]["Accuracy (top-1)"]
+acc_random = cnn_summary["random_split_accuracy"]
+
+# ---- Task 3 results (Siamese, writer folds) ----
+folds = load_csv("siamese_writer_folds.csv")
+folds_digit = load_csv("siamese_writer_folds_by_digit.csv")
+folds_hist = load_csv("siamese_folds_history.csv")
+contrast = load_csv("contrastive_folds.csv")
+fold0 = load_npz("siamese_fold0_dist.npz")
+sia_main = folds[(folds.pairs == "diff_session") & (folds.model == "Siamese")]
+raw_main = folds[(folds.pairs == "diff_session") & (folds.model == "raw pixels")]
+pair_types = folds[folds.model == "Siamese"].groupby("pairs")[["AUC", "EER", "accuracy"]].mean()
+
+# ---- Task 5 and 6 results ----
+hpo = load_csv("siamese_hpo.csv")
+ident = load_csv("comparison_identification.csv").set_index("model")
+verif = load_csv("comparison_verification.csv").set_index("model")
+cmp_digit = load_csv("comparison_by_digit.csv").set_index("digit")
+per_writer = load_csv("comparison_per_writer.csv").set_index("writer")
+sessions_cmp = load_csv("comparison_sessions.csv").set_index("session")
+```
+
+# Introduction
+
+[Write in your own words: the problem (who wrote a digit, and are two digits by the same person), why it matters (e.g. forensic document examination, signature verification [@bromley1993signature]), the two approaches compared (a CNN classifier and a Siamese network), and a one-paragraph preview of the main findings.]
+
+All code is in the accompanying bundle: `src/` holds the modules, `run_experiments.py` trains every model and saves results to `results/`, and this report reads those results. The analysis was done in Python with Keras 3 on TensorFlow.
+
+# Data and exploratory analysis (Task 1)
+
+```{python}
+#| label: tbl-structure
+#| tbl-cap: "Structure of the dataset."
+#| output: asis
+show_table(eda.structure_checks(images, meta))
+```
+
+```{python}
+#| label: fig-writers-digits
+#| fig-cap: "Digits 0–4 (rows) for each of the 20 writers (columns); session 1, replicate 1."
+rows = [[eda.find_row(meta, p, d, 1, 1) for p in range(1, 21)] for d in range(5)]
+eda.image_panel(images, rows, row_labels=[f"digit {d}" for d in range(5)],
+                col_labels=[f"W{p}" for p in range(1, 21)], cell=0.34)
+plt.show()
+```
+
+```{python}
+#| label: fig-sessions
+#| fig-cap: "Writer 3: four replicates in each of the five sessions."
+rows = [[eda.find_row(meta, 3, d, s, r) for s in range(1, 6) for r in range(1, 5)] for d in range(5)]
+cols = [f"session {s}" if r == 1 else "" for s in range(1, 6) for r in range(1, 5)]
+eda.image_panel(images, rows, row_labels=[f"digit {d}" for d in range(5)], col_labels=cols, cell=0.34)
+plt.show()
+```
+
+[Describe the visible sources of variation: between writers (size, slant, aspect ratio, stroke weight, letter forms such as the hooked 1), between sessions (e.g. writer 3's digit 1 in session 1 vs later sessions), and within a session (replicates nearly identical).]
+
+```{python}
+#| label: tbl-eta
+#| tbl-cap: "Share of total pixel variance explained by each grouping (between-group sum of squares over total sum of squares)."
+#| output: asis
+eta = eda.eta_squared_table(images, meta)
+show_table(eta)
+eta_v = eta.set_index("Grouping")["Share of pixel variance"]
+```
+
+```{python}
+#| label: fig-pairdist
+#| fig-cap: "Pixel distance between two images of the same digit, by type of pair (5,000 random pairs of each type)."
+#| fig-height: 3
+pdist = eda.pair_distances(images, meta)
+order = ["same writer, same session", "same writer, different session", "different writer"]
+fig, ax = plt.subplots(figsize=(6, 3))
+ax.boxplot([pdist.loc[pdist["pair type"] == t, "distance"] for t in order], showfliers=False)
+ax.set_xticks([1, 2, 3], [t.replace(", ", ",\n") for t in order])
+ax.set_ylabel("Euclidean distance")
+plt.show()
+pd_med = pdist.groupby("pair type").distance.median()
+```
+
+Median distances are `{python} f"{pd_med[order[0]]:.1f}"` (same writer, same session), `{python} f"{pd_med[order[1]]:.1f}"` (same writer, different session) and `{python} f"{pd_med[order[2]]:.1f}"` (different writers). Once writer and digit are known, adding the session raises the explained pixel variance from `{python} f3(eta_v["Writer x digit"])` to `{python} f3(eta_v["Writer x digit x session"])`.
+
+[Interpret: what these numbers say about the size of the session effect relative to writer differences, and why the near-duplicate replicates matter for evaluation (link forward to the evaluation design).]
+
+**Limitations of the simulated data.** [Your list: e.g. only digits 0–4 and 20 writers; perfectly balanced; clean, centred, noise-free images with stamped strokes; session effects that look like simple parametric shifts; unknown generator settings, so models may learn the simulator's rules rather than handwriting traits; effective sample size closer to the 500 writer × digit × session cells than to 25,000 images.]
+
+# Evaluation design and leakage (Task 4)
+
+| Model | Question | Train | Validation (early stopping, threshold, tuning) | Test | Generalisation measured |
+|---|---|---|---|---|---|
+| CNN | Which of the 20 writers? | Sessions 1–3, all writers | Session 4 | Session 5 | Known writers, new recording occasion |
+| Siamese | Same writer or not? | 12 writers, all sessions | 4 other writers | 4 unseen writers (5 rotating folds) | New writers |
+| CNN vs Siamese (Task 6) | Both | Sessions 1–3 | Session 4 | Session 5 | Known writers, new occasion |
+
+: Train, validation and test strategy. {#tbl-splits}
+
+```{python}
+#| label: tbl-leakage
+#| tbl-cap: "Effect of the split on measured performance."
+#| output: asis
+leak = pd.DataFrame([
+    {"Model": "CNN", "Evaluation": "random image split (60/20/20)", "Metric": "accuracy", "Value": acc_random},
+    {"Model": "CNN", "Evaluation": "session split (test = session 5), no augmentation", "Metric": "accuracy", "Value": acc_base},
+    {"Model": "Siamese", "Evaluation": "unseen writers, same-session pairs", "Metric": "AUC", "Value": pair_types.loc["same_session", "AUC"]},
+    {"Model": "Siamese", "Evaluation": "unseen writers, different-session pairs", "Metric": "AUC", "Value": pair_types.loc["diff_session", "AUC"]},
+])
+show_table(leak)
+```
+
+[Justify the choices in @tbl-splits, explain what each test represents in practice, and discuss leakage and optimism. Points to cover: random splits put near-duplicate replicates in train and test (@tbl-leakage); writers cannot be held out for closed-set identification; validation data are reused for early stopping, thresholds and tuning; the decision to add augmentation was made after seeing session-5 accuracy (mild test reuse); only 4 test writers per fold; simulated data.]
+
+# Writer identification with a CNN (Task 2)
+
+**Prediction task.** The input is a single 28 × 28 image, scaled to $[0,1]$; the response is the writer ID (20 classes). The digit is not given to the model. The CNN follows the Lecture 4 pattern (@tbl-cnn-arch), is trained with categorical cross-entropy and Adam (batch size 128), and stops early when validation loss has not improved for 5 epochs. A second version adds random rotation (up to about 15°), zoom and shift (up to 10%) to the training images.
+
+| Layer | Output shape | Parameters |
+|---|---|---|
+| Conv 32 filters 3×3, ReLU | 26 × 26 × 32 | 320 |
+| Conv 32 filters 3×3, ReLU | 24 × 24 × 32 | 9,248 |
+| Max pool 2×2, dropout 0.25 | 12 × 12 × 32 | 0 |
+| Conv 64 filters 3×3, ReLU | 10 × 10 × 64 | 18,496 |
+| Max pool 2×2, dropout 0.25 | 5 × 5 × 64 | 0 |
+| Flatten, dense 128 ReLU, dropout 0.5 | 128 | 204,928 |
+| Dense 20, softmax | 20 | 2,580 |
+
+: CNN architecture (`src/cnn.py`); `{python} f"{cnn_summary['n_params']:,}"` parameters in total. {#tbl-cnn-arch}
+
+```{python}
+#| label: fig-cnn-loss
+#| fig-cap: "Training and validation loss of the CNN without (left) and with (right) data augmentation."
+fig, axes = plt.subplots(1, 2, figsize=(7, 2.8), sharey=True)
+for ax, name in zip(axes, ["baseline", "augmented"]):
+    h = cnn_hist[cnn_hist.model == name]
+    ax.plot(h.epoch, h.loss, marker="o", ms=3, label="training")
+    ax.plot(h.epoch, h.val_loss, marker="o", ms=3, label="validation (session 4)")
+    ax.set_title(name); ax.set_xlabel("epoch")
+axes[0].set_ylabel("cross-entropy"); axes[0].legend()
+plt.tight_layout(); plt.show()
+```
+
+```{python}
+#| label: tbl-cnn-overall
+#| tbl-cap: "CNN writer identification on the test session (session 5, 5,000 images). Chance accuracy is 0.05."
+#| output: asis
+cnn_tab = pd.DataFrame(cnn_metrics).T
+cnn_tab["Epochs (best + patience)"] = cnn_tab["Epochs (best + patience)"].astype(int)
+show_table(cnn_tab, index=True)
+```
+
+```{python}
+#| label: tbl-cnn-digit
+#| tbl-cap: "Augmented CNN on session 5, by digit (1,000 images each)."
+#| output: asis
+top3 = np.argsort(-P_AUG, axis=1)[:, :3]
+by_d = pd.DataFrame({"digit": digit_test, "correct": pred_aug == y_test,
+                     "top3": (top3 == y_test[:, None]).any(1)})
+show_table(by_d.groupby("digit").mean().rename(columns={"correct": "accuracy", "top3": "top-3 accuracy"}), index=True)
+```
+
+```{python}
+#| label: fig-cnn-writer
+#| fig-cap: "Share of each writer's session-5 images identified correctly by the augmented CNN (dashed: overall accuracy)."
+#| fig-height: 2.6
+rec = pd.Series(pred_aug == y_test).groupby(y_test + 1).mean()
+fig, ax = plt.subplots(figsize=(7, 2.6))
+ax.bar(rec.index, rec.values)
+ax.axhline(acc_aug, color="black", ls="--", lw=1)
+ax.set_xticks(range(1, 21)); ax.set_xlabel("writer"); ax.set_ylabel("recall")
+plt.show()
+```
+
+```{python}
+#| label: tbl-cnn-multi
+#| tbl-cap: "Accuracy when the CNN's probabilities are averaged over k session-5 images of the same writer."
+#| output: asis
+show_table(cnn_mod.multi_image_accuracy(P_AUG, y_test))
+```
+
+[Report and interpret: overall accuracy `{python} f3(acc_aug)` (vs chance 0.05); overfitting of the baseline and the effect of augmentation (@fig-cnn-loss); differences by digit and by writer; what accuracy, top-3 accuracy, macro F1 and the multi-image results mean in real-world terms (e.g. a shortlist for a human examiner; more handwriting gives more reliable attribution); the closed-set limitation (an unknown writer is always assigned to one of the 20).]
+
+# Siamese network for writer matching (Task 3)
+
+**Design.** A shared embedding CNN (same convolutional layers as @tbl-cnn-arch, then dense 128 and a 64-unit output scaled to length 1) maps each image to a vector. Training uses the triplet loss [@schroff2015facenet], following the Keras example in the course notes [@essam2021keras]:
+$$
+L(A,P,N) = \max\!\left(\lVert f(A)-f(P)\rVert^2 - \lVert f(A)-f(N)\rVert^2 + \alpha,\ 0\right), \qquad \alpha = 0.5 .
+$$
+Two images are declared to be by the same writer when the squared distance between their embeddings is below a threshold chosen on validation writers (`src/siamese.py`).
+
+| Image | Writer | Digit | Session |
+|---|---|---|---|
+| Anchor $A$ | random | random | random |
+| Positive $P$ | same as $A$ | same as $A$ | different from $A$ |
+| Negative $N$ | different from $A$ | same as $A$ | random |
+
+: Construction of training triplets; 15,000 new random triplets are drawn every epoch. {#tbl-triplets}
+
+[Explain why the digit is held fixed in every triplet and why positives come from a different session (link to the EDA).]
+
+As a comparison, a second Siamese network with **contrastive loss** [@hadsell2006dimensionality] was implemented by Lehlonono Nkejane (originally in R; ported to Python in `src/contrastive.py`): a smaller encoder (16-dimensional embedding), one fixed set of 6,000 training pairs (same digit, different sessions, half same-writer), 10 epochs. Both models are evaluated on the same test pairs.
+
+```{python}
+#| label: tbl-siamese-folds
+#| tbl-cap: "Matching performance on unseen writers: different-session, same-digit test pairs (6,000 per fold, half same-writer). AUC by fold; error rates use the threshold chosen on the validation writers."
+#| output: asis
+tab = pd.DataFrame({"Triplet Siamese": sia_main.set_index("fold").AUC,
+                    "Contrastive Siamese": contrast.set_index("fold").AUC,
+                    "Raw pixels": raw_main.set_index("fold").AUC})
+tab.loc["mean"] = tab.mean(); tab.loc["sd"] = tab.iloc[:5].std()
+show_table(tab, index=True)
+```
+
+```{python}
+#| label: tbl-siamese-errors
+#| tbl-cap: "Error rates on unseen writers (mean over the five folds)."
+#| output: asis
+err = pd.DataFrame({
+    "Triplet Siamese": sia_main[["EER", "false accept", "false reject", "accuracy"]].mean(),
+    "Contrastive Siamese": contrast[["EER", "false accept", "false reject", "accuracy"]].mean(),
+}).T
+show_table(err, index=True)
+```
+
+```{python}
+#| label: fig-siamese
+#| fig-cap: "Left: validation AUC (unseen writers) by epoch for each fold. Right: embedding distances of same-writer and different-writer test pairs in fold 0, with the threshold chosen on the validation writers."
+fig, axes = plt.subplots(1, 2, figsize=(7, 2.9))
+for k, h in folds_hist.groupby("fold"):
+    axes[0].plot(h.epoch, h.validation, marker="o", ms=3, label=f"fold {k}")
+axes[0].set_xlabel("epoch"); axes[0].set_ylabel("validation AUC"); axes[0].legend(fontsize=6)
+d, l = fold0["dist"], fold0["label"]
+axes[1].hist(d[l == 1], bins=40, alpha=0.6, density=True, label="same writer")
+axes[1].hist(d[l == 0], bins=40, alpha=0.6, density=True, label="different writer")
+axes[1].axvline(float(fold0["threshold"]), color="black", ls="--", lw=1)
+axes[1].set_xlabel("squared embedding distance"); axes[1].legend(fontsize=6)
+plt.tight_layout(); plt.show()
+```
+
+```{python}
+#| label: tbl-siamese-digit
+#| tbl-cap: "Triplet Siamese AUC on unseen writers by digit (mean and standard deviation over the five folds)."
+#| output: asis
+show_table(folds_digit.groupby("digit").AUC.agg(["mean", "std"]), index=True)
+```
+
+[Explain how matching performance is evaluated (AUC, equal error rate, false accept and false reject rates at a validation-chosen threshold) and what each means in practice. Interpret: performance on unseen writers vs raw pixels; triplet vs contrastive (similar AUC, contrastive much faster to train); the spread across folds; by-digit differences; same-session vs different-session vs different-digit pairs (@tbl-leakage and appendix @tbl-pairtypes).]
+
+# Hyperparameter sensitivity (Task 5)
+
+The triplet margin (0.2, 0.5, 1.0) and the embedding size (16, 64) were varied for the Siamese network, trained on sessions 1–3 of all writers and scored on session 4 only. The default (0.5, 64) was repeated with three seeds to measure run-to-run variation.
+
+```{python}
+#| label: tbl-hpo
+#| tbl-cap: "Validation results (session 4) for each setting. AUC: same-writer vs different-writer pairs of a session-4 and a session 1–3 image; identification: nearest-prototype accuracy over 20 writers."
+#| output: asis
+show_table(hpo[["margin", "embedding size", "seed", "epochs", "val AUC", "val EER",
+                "val identification", "val top-3"]])
+grid = hpo[hpo.seed == 0]
+seeds = hpo[(hpo.margin == 0.5) & (hpo["embedding size"] == 64)]
+```
+
+```{python}
+#| label: fig-hpo
+#| fig-cap: "Sensitivity of validation AUC (left) and identification accuracy (right) to the triplet margin and embedding size. Grey band: range over three seeds of the default setting."
+fig, axes = plt.subplots(1, 2, figsize=(7, 2.8))
+for ax, metric in zip(axes, ["val AUC", "val identification"]):
+    for dim, g in grid.groupby("embedding size"):
+        ax.plot(g.margin, g[metric], marker="o", ms=4, label=f"size {dim}")
+    ax.axhspan(seeds[metric].min(), seeds[metric].max(), color="grey", alpha=0.2, label="seed range")
+    ax.set_xticks([0.2, 0.5, 1.0]); ax.set_xlabel("margin"); ax.set_title(metric)
+axes[0].legend(fontsize=7)
+plt.tight_layout(); plt.show()
+```
+
+Across the grid, validation AUC ranges from `{python} f3(grid["val AUC"].min())` to `{python} f3(grid["val AUC"].max())`; the three seeds of the default setting range from `{python} f3(seeds["val AUC"].min())` to `{python} f3(seeds["val AUC"].max())`. Identification accuracy ranges from `{python} f3(grid["val identification"].min())` to `{python} f3(grid["val identification"].max())` across the grid.
+
+[Interpret: how sensitive each measure is relative to seed noise; which setting was chosen and why the choice is partly chance; limits of the search.]
+
+# Comparison of the CNN and the Siamese network (Task 6)
+
+Both models are compared on the session split (test = session 5). The Siamese network identifies writers by the nearest *prototype*, the average embedding of each writer × digit in sessions 1–3 [@snell2017prototypical; @utkin2019explanation]; the CNN's 128-unit feature layer is also used in the same way. For verification, a session-5 image is compared with a session 1–3 image of the same digit.
+
+```{python}
+#| label: tbl-cmp-ident
+#| tbl-cap: "Writer identification on session 5 (20 writers)."
+#| output: asis
+show_table(ident, index=True)
+```
+
+```{python}
+#| label: tbl-cmp-verif
+#| tbl-cap: "Verification on session 5: 20,000 pairs of a session-5 and a session 1–3 image of the same digit; threshold chosen on session 4."
+#| output: asis
+show_table(verif[["AUC", "EER", "false accept", "false reject", "accuracy"]], index=True)
+```
+
+```{python}
+#| label: tbl-cmp-digit
+#| tbl-cap: "Writer information by digit on session 5, with the Siamese AUC on unseen writers (Task 3) for reference. Brackets: rank of the digit in each column (1 = best)."
+#| output: asis
+dig = cmp_digit.copy()
+dig["Siamese AUC, unseen writers"] = folds_digit.groupby("digit").AUC.mean()
+ranks = dig.rank(ascending=False).astype(int)
+show_table(dig.round(3).astype(str) + " (" + ranks.astype(str) + ")", index=True)
+```
+
+```{python}
+#| label: fig-shift
+#| fig-cap: "Per-writer session-5 identification accuracy against how much the writer's digits changed between sessions 1–3 and session 5 (pixel distance between average images, averaged over digits)."
+#| fig-height: 3.2
+fig, ax = plt.subplots(figsize=(6, 3.2))
+ax.scatter(per_writer["session shift"], per_writer["CNN accuracy"], label="CNN")
+ax.scatter(per_writer["session shift"], per_writer["Siamese accuracy"], marker="s", label="Siamese")
+for w, r in per_writer.iterrows():
+    ax.annotate(str(w), (r["session shift"], r["CNN accuracy"]), fontsize=6, xytext=(2, 2), textcoords="offset points")
+ax.set_xlabel("session shift"); ax.set_ylabel("accuracy"); ax.legend()
+plt.show()
+rho_c = spearmanr(per_writer["session shift"], per_writer["CNN accuracy"])
+rho_s = spearmanr(per_writer["session shift"], per_writer["Siamese accuracy"])
+```
+
+Spearman correlation between session shift and accuracy over the 20 writers: `{python} f"{rho_c.statistic:.2f}"` for the CNN (p = `{python} f3(rho_c.pvalue)`) and `{python} f"{rho_s.statistic:.2f}"` for the Siamese network (p = `{python} f3(rho_s.pvalue)`). Identification accuracy on session 4 / session 5 is `{python} f3(sessions_cmp.iloc[0]["CNN"])` / `{python} f3(sessions_cmp.iloc[1]["CNN"])` for the CNN and `{python} f3(sessions_cmp.iloc[0]["Siamese"])` / `{python} f3(sessions_cmp.iloc[1]["Siamese"])` for the Siamese network.
+
+[Discuss critically: which model suits which task (closed-set identification vs open-set verification; enrolling a new writer without retraining); whether CNN features transfer to verification; which digits carry more writer information, how consistent the ranking is (@tbl-cmp-digit) and how large differences are relative to noise (about ±0.015 for 1,000 images); how session changes affect performance (same- vs different-session pairs, session 4 vs 5, per-writer shift in @fig-shift, writers that fail completely). Note that the chosen Siamese model is the best of three seeds on validation, which slightly favours it.]
+
+# Conclusion
+
+[Your conclusions and recommendations, including what would be needed for real handwriting.]
+
+# Collaboration (Task 7)
+
+```{python}
+#| label: tbl-git
+#| tbl-cap: "Commits per GitHub author in the project repository (merge commits are pull requests merged by that author)."
+#| output: asis
+by_author, n_prs = ru.git_history()
+if by_author is not None:
+    show_table(by_author, index=True, floatfmt=".0f")
+else:
+    print("*Git history not available in this copy of the bundle.*")
+```
+
+[Describe the workflow: one branch per piece of work, pull requests reviewed by another member before merging, members working on the same files (e.g. the merged EDA notebook combining two members' work); link to the repository and the GitHub Pages site.]
+
+# Plagiarism declaration {.unnumbered}
+
+1. We know that plagiarism is wrong. Plagiarism is to use another's work and pretend that it is one's own.
+2. We have used the author–date convention for citation and referencing. Each contribution to, and quotation in, this report from the work(s) of other people has been attributed, and has been cited and referenced.
+3. This report is our own work.
+4. We have not allowed, and will not allow, anyone to copy our work with the intention of passing it off as his or her own work.
+5. We acknowledge that copying someone else's assignment or essay, or part of it, is wrong, and declare that this is our own work.
+
+Signed: Lungelo Phewa \_\_\_\_\_\_ Lehlonono Nkejane \_\_\_\_\_\_ Ishmael Ngobeni \_\_\_\_\_\_ Date: \_\_\_\_\_\_
+
+# AI use statement {.unnumbered}
+
+| Task | (a) Tool | (b) What it was used for | (c) How outputs were checked | (d) How much was used |
+|---|---|---|---|---|
+| 1 EDA | Claude (Anthropic) | Python data loader and EDA code; merging two members' EDA work; checking the R statistics in Python | [to complete] | [to complete] |
+| 2 CNN | Claude (Anthropic) | CNN code, augmentation, evaluation code | [to complete] | [to complete] |
+| 3 Siamese | Claude (Anthropic) | Triplet-loss Siamese code, pair construction, metrics; Python port of the contrastive model | [to complete] | [to complete] |
+| 4 Splits | Claude (Anthropic) | Writer-fold design, leakage comparisons | [to complete] | [to complete] |
+| 5 Tuning | Claude (Anthropic) | Grid search and seed-repeat code | [to complete] | [to complete] |
+| 6 Comparison | Claude (Anthropic) | Prototype identification, comparison code | [to complete] | [to complete] |
+| 7 Git | Claude (Anthropic) | Step-by-step Git/GitHub commands | [to complete] | [to complete] |
+| 8 Report | Claude (Anthropic) | Quarto structure, figures and tables; no report prose | [to complete] | [to complete] |
+| 9 Website | [to complete] | [to complete] | [to complete] | [to complete] |
+
+: AI use, by task. {#tbl-ai}
+
+# References {.unnumbered}
+
+::: {#refs}
+:::
+
+# Appendix {.appendix}
+
+```{python}
+#| label: tbl-pairtypes
+#| tbl-cap: "Triplet Siamese on unseen writers by type of test pair (mean over five folds)."
+#| output: asis
+show_table(pair_types.loc[["same_session", "diff_session", "diff_digit"]], index=True)
+```
+
+```{python}
+#| label: fig-confusion
+#| fig-cap: "Confusion matrix of the augmented CNN on session 5 (rows: true writer, normalised to sum to 1)."
+#| fig-height: 4.5
+cm = confusion_matrix(y_test, pred_aug, normalize="true")
+fig, ax = plt.subplots(figsize=(5, 4.5))
+im = ax.imshow(cm, cmap="Blues"); ax.grid(False)
+ax.set_xticks(range(20), range(1, 21), fontsize=6); ax.set_yticks(range(20), range(1, 21), fontsize=6)
+ax.set_xlabel("predicted writer"); ax.set_ylabel("true writer")
+fig.colorbar(im, ax=ax, shrink=0.8)
+plt.show()
+```
+
+```{python}
+#| label: fig-pca
+#| fig-cap: "First two principal components of the images, coloured by digit (left) and by writer (right)."
+Z, pca_share = eda.pca_2d(images)
+fig, axes = plt.subplots(1, 2, figsize=(7, 3))
+axes[0].scatter(Z[:, 0], Z[:, 1], c=meta.digit, cmap="tab10", s=0.5, alpha=0.5)
+axes[1].scatter(Z[:, 0], Z[:, 1], c=meta.person_id, cmap="tab20", s=0.5, alpha=0.5)
+for ax, t in zip(axes, ["by digit", "by writer"]):
+    ax.set_title(t); ax.set_xlabel("PC1"); ax.set_ylabel("PC2")
+plt.tight_layout(); plt.show()
+```
+
+The first two components explain `{python} f"{100 * pca_share:.0f}"`% of the pixel variance.
