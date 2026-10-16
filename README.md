@@ -45,17 +45,22 @@ DS4I-Assignment/
 ├── Assignment 2/                 # brief (PDF) and data (handwriting.rds)
 ├── src/
 │   ├── data_utils.py             # load the .rds file into NumPy / pandas
-│   └── eda_plots.py              # plotting and style measurements for the EDA
-├── notebooks/
-│   ├── 01_eda_overview_people_digits.ipynb
-│   └── 02_eda_sessions_and_limitations.ipynb
+│   ├── eda_plots.py              # plotting and style measurements for the EDA
+│   └── siamese.py                # Siamese network: triplets, pairs, training, metrics
+├── notebooks/                    # run in this order
+│   ├── 01_eda.ipynb                          # Task 1
+│   ├── 03_cnn_writer_id.ipynb                # Task 2 (CNN), Task 4 (random vs session split)
+│   ├── 04_siamese_writer_matching.ipynb      # Task 3 (Siamese), Task 4 (writer-disjoint folds)
+│   ├── 05_hyperparameter_sensitivity.ipynb   # Task 5
+│   └── 06_cnn_vs_siamese.ipynb               # Task 6 (needs 04 and 05 to have been run)
+├── results/                      # CSVs and model weights written by notebooks 04 and 05
 ├── requirements.txt
 └── README.md
 ```
 
 ## Getting started
 
-Requires Python 3.10+.
+Requires Python 3.10 or newer, in a version TensorFlow supports. Notebooks 03–06 train neural networks on the CPU and take roughly 5–30 minutes each.
 
 ```bash
 git clone https://github.com/Lungelo-DS/DS4I-Assignment.git
