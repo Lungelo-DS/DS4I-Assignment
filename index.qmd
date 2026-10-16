@@ -1,0 +1,9 @@
+---
+title: "Writer Identification from Handwritten Digits"
+subtitle: "STA5073Z Data Science for Industry 2026 — Assignment 2"
+format: html
+---
+
+- [Read the report (web version)](report.html)
+- [Download the report (PDF)](report.pdf)
+- [Source code on GitHub](https://github.com/Lungelo-DS/DS4I-Assignment)

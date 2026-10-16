@@ -1,0 +1,3 @@
+session,CNN,Siamese
+session 4 (validation),0.5918,0.6268
+session 5 (test),0.6354,0.6628

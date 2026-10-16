@@ -1,0 +1,6 @@
+project:
+  type: default
+  output-dir: docs          # GitHub Pages: Settings -> Pages -> Deploy from branch main, folder /docs
+  render:
+    - index.qmd
+    - report.qmd

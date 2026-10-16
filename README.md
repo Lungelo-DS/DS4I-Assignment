@@ -42,42 +42,42 @@ Pixel values run from 0 (background) to 255 (ink) and are scaled to [0, 1] befor
 
 ```
 DS4I-Assignment/
+├── report.qmd                    # the report (Quarto, Python chunks) -> PDF and HTML
+├── index.qmd, _quarto.yml        # GitHub Pages landing page; output goes to docs/
+├── references.bib
+├── run_experiments.py            # trains every model and saves results/ (~70 min on a CPU)
 ├── Assignment 2/                 # brief (PDF) and data (handwriting.rds)
-├── src/
+├── src/                          # modules imported by the report and notebooks
 │   ├── data_utils.py             # load the .rds file into NumPy / pandas
-│   ├── eda_plots.py              # plotting and style measurements for the EDA
-│   └── siamese.py                # Siamese network: triplets, pairs, training, metrics
-├── notebooks/                    # run in this order
-│   ├── 01_eda.ipynb                          # Task 1
-│   ├── 03_cnn_writer_id.ipynb                # Task 2 (CNN), Task 4 (random vs session split)
-│   ├── 04_siamese_writer_matching.ipynb      # Task 3 (Siamese), Task 4 (writer-disjoint folds)
-│   ├── 05_hyperparameter_sensitivity.ipynb   # Task 5
-│   └── 06_cnn_vs_siamese.ipynb               # Task 6 (needs 04 and 05 to have been run)
-├── results/                      # CSVs and model weights written by notebooks 04 and 05
+│   ├── eda_plots.py              # style measurements (ink, width, slant, ...)
+│   ├── eda_stats.py              # EDA tables and figures (Task 1)
+│   ├── cnn.py                    # CNN writer identification (Task 2)
+│   ├── siamese.py                # triplet-loss Siamese network (Tasks 3, 5, 6)
+│   ├── contrastive.py            # contrastive-loss Siamese, L. Nkejane's design (Task 3)
+│   ├── experiments.py            # all training runs, cached in results/
+│   └── report_utils.py           # tables, plot style, git history for the report
+├── notebooks/                    # exploratory notebooks (same analyses, step by step)
+├── results/                      # saved results and model weights
+├── docs/                         # rendered website (GitHub Pages)
 ├── requirements.txt
 └── README.md
 ```
 
-## Getting started
+## Reproducing the report
 
-Requires Python 3.10 or newer, in a version TensorFlow supports. Notebooks 03–06 train neural networks on the CPU and take roughly 5–30 minutes each.
+Requires Python 3.10 or newer, in a version TensorFlow supports.
 
 ```bash
 git clone https://github.com/Lungelo-DS/DS4I-Assignment.git
 cd DS4I-Assignment
 python -m venv .venv
-.venv\Scripts\activate            # Windows  (macOS/Linux: source .venv/bin/activate)
+.venv\Scripts\activate           # Windows  (macOS/Linux: source .venv/bin/activate)
 pip install -r requirements.txt
+python run_experiments.py         # skips steps whose results already exist; --force to redo all
+quarto render                     # writes docs/report.pdf, docs/report.html and docs/index.html
 ```
 
-Open the folder in VS Code, select the `.venv` interpreter, and run the notebooks in `notebooks/`.
-
-The data is read in Python with the `rdata` package:
-
-```python
-from data_utils import load_handwriting
-images, meta = load_handwriting()   # images: (25000, 28, 28) in [0, 1]
-```
+Rendering needs Quarto (1.4 or newer) and a LaTeX installation for the PDF (`quarto install tinytex`).
 
 ## Collaboration workflow
 
@@ -90,8 +90,9 @@ images, meta = load_handwriting()   # images: (25000, 28, 28) in [0, 1]
 
 | Member | GitHub | Responsibilities |
 |---|---|---|
-| _Name_ | [@Lungelo-DS](https://github.com/Lungelo-DS) | Repo setup, EDA overview (people × digits) |
-| _Name_ | _@second-account_ | EDA sessions and data limitations |
+| Lungelo Phewa | [@Lungelo-DS](https://github.com/Lungelo-DS), [@LungeloPhewa](https://github.com/LungeloPhewa) | [to complete] |
+| Lehlonono Nkejane | [to complete] | [to complete] |
+| Ishmael Ngobeni | [@IshmaelNgobeni](https://github.com/IshmaelNgobeni) | [to complete] |
 
 ## Licence
 
